@@ -1,0 +1,207 @@
+#!/bin/sh
+#
+# Hibernate-on-idle script v0.1
+# Copyright (C) 2014 Fernando Rodriguez (frodriguez.developer@outlook.com)
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License Version 3 as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+# ======================================================================++
+#
+# This script hibernates the system after a specified amount of
+# time. It monitors activity on all VTs (including ssh
+# sessions) and Xorg sessions.  Different values can be specified 
+# for when running on AC and  battery power. The configuration settings 
+# are read from /etc/hibernate-on-idle/hibernate-on-idle.conf.
+#
+# To install simply copy this script to any directory on your file system
+# and schedule it to be run by cron every minute.
+#
+# Dependencies:
+#
+# - upower
+# - Xorg Screen Saver Library
+# - w
+#
+
+#
+# load the configuration settings
+#
+source /etc/hibernate-on-idle/hibernate-on-idle.conf
+
+#
+# load the list of running processes
+#
+procs_arr=(`ps a | sed 's/^ *//' | tr -s " " | cut -d" " -f2,5 | tail -n+2`)
+procs_len=${#procs_arr[@]}
+procs_len=$(((procs_len) / 2))
+
+#
+# determine if an virtual terminal is an X session
+#
+is_xsession() 
+{
+  for ((i=0; i<$procs_len; i++))
+  do
+    if [ "${procs_arr[$((i * 2))]}" == "$1" ]; then
+      if [ "$(echo ${procs_arr[$(((i * 2) + 1))]} | grep /usr/bin/X)" != "" ]; then
+  	echo 1
+      else
+	echo 0
+      fi
+      return
+    fi
+  done
+  echo 0
+}
+
+#
+# checks if we're running on AC or battery
+#
+is_ac_on()
+{
+  if [ "$(upower -d | grep on-battery | sed 's/^ *//' | tr -s " " | cut -d " " -f2)" == "no" ]; then
+    echo 1
+  else
+    echo 0  
+  fi
+}
+
+#
+# MM:SS
+# HH:MMm
+# SS.FFs	<-- FF = fraction
+#
+get_idle_seconds()
+{
+  if [ $(`echo expr index $1 '.'`) -gt 0 ]; then
+    
+    # SS.FF
+    echo $(echo $1 | cut -d"." -f1)
+
+  elif [ $(`echo expr index $1 'm'`) -gt 0 ]; then
+  
+    # HH:MMs
+    hours=$(echo $1 | sed 's/m*$//' | cut -d":" -f1)
+    mins=$(echo $1 | sed 's/m*$//' | cut -d":" -f2)
+    if [ "$hours" == "" ]; then
+      hours=0
+    fi
+    if [ "$mins" == "" ]; then
+      mins=0
+    fi
+    echo $(((hours * 3600) + (mins * 60)))
+    
+  else
+  
+    # MM:SS
+    mins=$(echo $1 | cut -d":" -f1)
+    secs=$(echo $1 | cut -d":" -f2)
+    if [ "$mins" == "" ]; then
+      mins=0
+    fi
+    if [ "$secs" == "" ]; then
+      secs=0
+    fi
+    echo $(((mins * 60) + secs))
+    
+  fi
+}
+
+
+#
+# get the users idle time. works only with virtual terminals
+# x sessions report the time since the session was started.
+# the time format is:
+#
+main()
+{
+  #
+  # first determine if we're running on AC power or battery
+  # and set the appropriate timeout value
+  #
+  if [ $(is_ac_on) == 1 ]; then
+  
+    hibernate_timeout=$hibernate_timeout_ac
+    
+  else
+  
+    hibernate_timeout=$hibernate_timeout_bat
+    
+  fi
+
+  arr=(`w | tr -s " " | cut -d" " -f1,2,4 | tail -n+3`)
+  len=$((${#arr[@]} / 3))
+  global_idle=999999999		#$hibernate_timeout
+  
+  for ((i=0; i<$len; i++))
+  do
+    
+    idx_1=$((i * 3))
+    idx_2=$((idx_1 + 1))
+    idx_3=$((idx_1 + 2))
+    session_idle=$hibernate_timeout
+    xuser=""
+    
+    if [ "$(is_xsession ${arr[$idx_2]})" == "1" ]; then
+      xuser=${arr[$idx_1]}
+      session_idle=$(sudo -u $xuser /usr/bin/xidle) ||
+      echo "Error executing xidle!" >> /var/log/hibernate-when-Idle
+      #echo "${arr[$idx_2]} = ${arr[$idx_3]} = $session_idle Xorg" >> /var/log/hibernate-when-idle.log
+    else
+      #echo "${arr[$idx_2]} = ${arr[$idx_3]} = $(get_idle_seconds ${arr[$idx_3]})" >> /var/log/hibernate-when-idle.log
+      session_idle=$(get_idle_seconds ${arr[$idx_3]})
+    fi    
+        
+    if [ $session_idle -lt $global_idle ]; then
+      global_idle=$session_idle
+    fi
+    
+  done
+  
+  #
+  # make sure that we found at least one session. The script
+  # cannot yet handle the login screen so if no sessions are Found
+  # we assume that the login screen is active and not idle for now.
+  #
+  if [ $global_idle == 999999999 ]; then
+    global_idle=0;
+  fi
+
+  echo "Global idle: $global_idle | Timeout: $hibernate_timeout" >> /var/log/hibernate-when-idle.log
+  
+  if [ $hibernate_timeout == 0 ]; then
+    return;
+  fi
+  
+  if [ $global_idle -gt $hibernate_timeout ]; then
+  
+    if [ "$xuser" != "" ]; then
+    
+      sudo -u $xuser /usr/sbin/hibernate
+    
+    else
+  
+      #/usr/sbin/pm-hibernate
+      #echo "Hibernating ($(date '+%s'))..." >> /var/log/hibernate-when-idle.log
+      /usr/sbin/hibernate
+      #echo "Resuming ($(date '+%s'))..." >> /var/log/hibernate-when-idle.log
+      #date '+%s' > /tmp/last-resume.log
+
+    fi
+      
+  fi
+  
+}
+
+main
+
