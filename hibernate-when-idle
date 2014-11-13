@@ -193,7 +193,8 @@ main()
   
       #/usr/sbin/pm-hibernate
       #echo "Hibernating ($(date '+%s'))..." >> /var/log/hibernate-when-idle.log
-      /usr/sbin/hibernate
+      #/usr/sbin/hibernate
+      eval $hibernate_command
       #echo "Resuming ($(date '+%s'))..." >> /var/log/hibernate-when-idle.log
       #date '+%s' > /tmp/last-resume.log
 
